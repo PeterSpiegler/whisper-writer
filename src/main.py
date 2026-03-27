@@ -23,6 +23,7 @@ class WhisperWriterApp(QObject):
         Initialize the application, opening settings window if no configuration file is found.
         """
         super().__init__()
+        self.autostart = '--autostart' in sys.argv
         self.app = QApplication(sys.argv)
         self.app.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
 
@@ -63,7 +64,12 @@ class WhisperWriterApp(QObject):
             self.status_window = StatusWindow()
 
         self.create_tray_icon()
-        self.main_window.show()
+
+        if self.autostart:
+            print('Autostart enabled - skipping main window, starting listener...')
+            self.key_listener.start()
+        else:
+            self.main_window.show()
 
     def create_tray_icon(self):
         """

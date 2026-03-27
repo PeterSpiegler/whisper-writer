@@ -5,4 +5,4 @@ from dotenv import load_dotenv
 
 print('Starting WhisperWriter...')
 load_dotenv()
-subprocess.run([sys.executable, os.path.join('src', 'main.py')])
+subprocess.run([sys.executable, os.path.join('src', 'main.py')] + sys.argv[1:])
