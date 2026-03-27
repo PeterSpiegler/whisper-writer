@@ -2,7 +2,7 @@ import subprocess
 import os
 import signal
 import time
-from pynput.keyboard import Controller as PynputController
+from pynput.keyboard import Controller as PynputController, Key
 
 from utils import ConfigManager
 
@@ -109,6 +109,31 @@ class InputSimulator:
         self.dotool_process.stdin.write(f"typedelay {interval * 1000}\n")
         self.dotool_process.stdin.write(f"type {text}\n")
         self.dotool_process.stdin.flush()
+
+    def send_backspaces(self, count):
+        """
+        Send backspace key presses to delete characters.
+
+        Args:
+            count (int): Number of backspace presses.
+        """
+        if count <= 0:
+            return
+        interval = ConfigManager.get_config_value('post_processing', 'writing_key_press_delay')
+        if self.input_method == 'pynput':
+            for _ in range(count):
+                self.keyboard.press(Key.backspace)
+                self.keyboard.release(Key.backspace)
+                time.sleep(interval)
+        elif self.input_method == 'ydotool':
+            for _ in range(count):
+                run_command_or_exit_on_failure(['ydotool', 'key', '14:1', '14:0'])
+                time.sleep(interval)
+        elif self.input_method == 'dotool':
+            assert self.dotool_process and self.dotool_process.stdin
+            for _ in range(count):
+                self.dotool_process.stdin.write("key BackSpace\n")
+            self.dotool_process.stdin.flush()
 
     def cleanup(self):
         """

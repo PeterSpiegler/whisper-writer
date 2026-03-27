@@ -24,6 +24,7 @@ class WhisperWriterApp(QObject):
         """
         super().__init__()
         self.autostart = '--autostart' in sys.argv
+        self._streaming_committed = ""
         self.app = QApplication(sys.argv)
         self.app.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
 
@@ -154,11 +155,14 @@ class WhisperWriterApp(QObject):
         if self.result_thread and self.result_thread.isRunning():
             return
 
+        self._streaming_committed = ""
         self.result_thread = ResultThread(self.local_model)
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.result_thread.statusSignal.connect(self.status_window.updateStatus)
             self.status_window.closeSignal.connect(self.stop_result_thread)
         self.result_thread.resultSignal.connect(self.on_transcription_complete)
+        if ConfigManager.get_config_value('recording_options', 'streaming'):
+            self.result_thread.intermediateSignal.connect(self.on_intermediate_result)
         self.result_thread.start()
 
     def stop_result_thread(self):
@@ -168,11 +172,56 @@ class WhisperWriterApp(QObject):
         if self.result_thread and self.result_thread.isRunning():
             self.result_thread.stop()
 
+    def _apply_text_delta(self, old_text, new_text):
+        """
+        Compute and apply the difference between old and new text using backspaces and typing.
+        """
+        if new_text == old_text:
+            return
+        if old_text and new_text.startswith(old_text):
+            # Simple append
+            self.input_simulator.typewrite(new_text[len(old_text):])
+        elif old_text:
+            # Find common prefix and correct
+            common_len = 0
+            for i in range(min(len(old_text), len(new_text))):
+                if old_text[i] == new_text[i]:
+                    common_len = i + 1
+                else:
+                    break
+            bs_count = len(old_text) - common_len
+            if bs_count > 0:
+                self.input_simulator.send_backspaces(bs_count)
+            new_part = new_text[common_len:]
+            if new_part:
+                self.input_simulator.typewrite(new_part)
+        else:
+            # No previous text
+            self.input_simulator.typewrite(new_text)
+
+    def on_intermediate_result(self, full_text):
+        """
+        Handle intermediate streaming transcription result.
+        Types the delta between previously committed text and the new transcription.
+        """
+        if not full_text:
+            return
+        self._apply_text_delta(self._streaming_committed, full_text)
+        self._streaming_committed = full_text
+
     def on_transcription_complete(self, result):
         """
         When the transcription is complete, type the result and start listening for the activation key again.
         """
-        self.input_simulator.typewrite(result)
+        if self._streaming_committed:
+            # Streaming mode: apply final correction
+            if result:
+                self._apply_text_delta(self._streaming_committed, result)
+            self._streaming_committed = ""
+        else:
+            # Batch mode: type full result
+            if result:
+                self.input_simulator.typewrite(result)
 
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
             AudioPlayer(os.path.join('assets', 'beep.wav')).play(block=True)

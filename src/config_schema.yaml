@@ -123,6 +123,14 @@ recording_options:
     value: 100
     type: int
     description: "The minimum duration in milliseconds for a recording to be processed. Recordings shorter than this will be discarded."
+  streaming:
+    value: true
+    type: bool
+    description: "Enable streaming transcription mode. Text appears in real-time during recording instead of after recording ends."
+  streaming_interval:
+    value: 2000
+    type: int
+    description: "Interval in milliseconds between streaming transcription updates. Lower values give faster updates but use more CPU/GPU."
 
 # Post-processing options for the transcribed text
 post_processing:

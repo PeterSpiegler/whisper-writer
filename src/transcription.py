@@ -88,24 +88,30 @@ def transcribe_api(audio_data):
     )
     return response.text
 
-def post_process_transcription(transcription):
+def post_process_transcription(transcription, final=True):
     """
     Apply post-processing to the transcription.
+
+    :param final: If False, skip trailing period removal and trailing space addition
+                  (used for intermediate streaming results).
     """
     transcription = transcription.strip()
     post_processing = ConfigManager.get_config_section('post_processing')
-    if post_processing['remove_trailing_period'] and transcription.endswith('.'):
-        transcription = transcription[:-1]
-    if post_processing['add_trailing_space']:
-        transcription += ' '
     if post_processing['remove_capitalization']:
         transcription = transcription.lower()
+    if final:
+        if post_processing['remove_trailing_period'] and transcription.endswith('.'):
+            transcription = transcription[:-1]
+        if post_processing['add_trailing_space']:
+            transcription += ' '
 
     return transcription
 
-def transcribe(audio_data, local_model=None):
+def transcribe(audio_data, local_model=None, final=True):
     """
-    Transcribe audio date using the OpenAI API or a local model, depending on config.
+    Transcribe audio data using the OpenAI API or a local model, depending on config.
+
+    :param final: Passed to post_process_transcription for streaming support.
     """
     if audio_data is None:
         return ''
@@ -115,5 +121,5 @@ def transcribe(audio_data, local_model=None):
     else:
         transcription = transcribe_local(audio_data, local_model)
 
-    return post_process_transcription(transcription)
+    return post_process_transcription(transcription, final=final)
 

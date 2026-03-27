@@ -1,4 +1,5 @@
 import time
+import threading
 import traceback
 import numpy as np
 import sounddevice as sd
@@ -24,13 +25,18 @@ class ResultThread(QThread):
     4. Transcribing the audio
     5. Emitting the transcription result
 
+    In streaming mode, transcription happens periodically during recording,
+    emitting intermediate results for real-time text output.
+
     Signals:
         statusSignal: Emits the current status of the thread (e.g., 'recording', 'transcribing', 'idle')
-        resultSignal: Emits the transcription result
+        resultSignal: Emits the final transcription result
+        intermediateSignal: Emits intermediate transcription during streaming (full text so far)
     """
 
     statusSignal = pyqtSignal(str)
     resultSignal = pyqtSignal(str)
+    intermediateSignal = pyqtSignal(str)
 
     def __init__(self, local_model=None):
         """
@@ -45,6 +51,12 @@ class ResultThread(QThread):
         self.sample_rate = None
         self.mutex = QMutex()
 
+        # Streaming state
+        self._recording_data = []
+        self._recording_lock = threading.Lock()
+        self._streaming_done = threading.Event()
+        self._speech_detected_event = threading.Event()
+
     def stop_recording(self):
         """Stop the current recording session."""
         self.mutex.lock()
@@ -56,6 +68,7 @@ class ResultThread(QThread):
         self.mutex.lock()
         self.is_running = False
         self.mutex.unlock()
+        self._streaming_done.set()
         self.statusSignal.emit('idle')
         self.wait()
 
@@ -69,33 +82,15 @@ class ResultThread(QThread):
             self.is_recording = True
             self.mutex.unlock()
 
+            streaming = ConfigManager.get_config_value('recording_options', 'streaming')
+
             self.statusSignal.emit('recording')
             ConfigManager.console_print('Recording...')
-            audio_data = self._record_audio()
 
-            if not self.is_running:
-                return
-
-            if audio_data is None:
-                self.statusSignal.emit('idle')
-                return
-
-            self.statusSignal.emit('transcribing')
-            ConfigManager.console_print('Transcribing...')
-
-            # Time the transcription process
-            start_time = time.time()
-            result = transcribe(audio_data, self.local_model)
-            end_time = time.time()
-
-            transcription_time = end_time - start_time
-            ConfigManager.console_print(f'Transcription completed in {transcription_time:.2f} seconds. Post-processed line: {result}')
-
-            if not self.is_running:
-                return
-
-            self.statusSignal.emit('idle')
-            self.resultSignal.emit(result)
+            if streaming:
+                self._run_streaming()
+            else:
+                self._run_batch()
 
         except Exception as e:
             traceback.print_exc()
@@ -104,10 +99,108 @@ class ResultThread(QThread):
         finally:
             self.stop_recording()
 
-    def _record_audio(self):
+    def _run_batch(self):
+        """Original batch transcription flow."""
+        audio_data = self._record_audio()
+
+        if not self.is_running:
+            return
+
+        if audio_data is None:
+            self.statusSignal.emit('idle')
+            return
+
+        self.statusSignal.emit('transcribing')
+        ConfigManager.console_print('Transcribing...')
+
+        start_time = time.time()
+        result = transcribe(audio_data, self.local_model)
+        end_time = time.time()
+
+        transcription_time = end_time - start_time
+        ConfigManager.console_print(f'Transcription completed in {transcription_time:.2f} seconds. Post-processed line: {result}')
+
+        if not self.is_running:
+            return
+
+        self.statusSignal.emit('idle')
+        self.resultSignal.emit(result)
+
+    def _run_streaming(self):
+        """Streaming transcription: transcribe periodically during recording."""
+        recording_options = ConfigManager.get_config_section('recording_options')
+        interval_ms = recording_options.get('streaming_interval') or 2000
+        interval_s = interval_ms / 1000.0
+
+        # Reset streaming state
+        self._recording_data = []
+        self._recording_lock = threading.Lock()
+        self._streaming_done = threading.Event()
+        self._speech_detected_event = threading.Event()
+
+        # Start transcription worker thread
+        worker = threading.Thread(target=self._streaming_worker, args=(interval_s,), daemon=True)
+        worker.start()
+
+        # Record audio (stores in self._recording_data via thread-safe access)
+        audio_data = self._record_audio(streaming=True)
+
+        # Stop worker and wait for it to finish
+        self._streaming_done.set()
+        worker.join(timeout=30)
+
+        if not self.is_running or audio_data is None:
+            self.statusSignal.emit('idle')
+            self.resultSignal.emit('')
+            return
+
+        # Final transcription of complete audio
+        self.statusSignal.emit('transcribing')
+        start_time = time.time()
+        result = transcribe(audio_data, self.local_model, final=True)
+        end_time = time.time()
+        ConfigManager.console_print(f'Final transcription in {end_time - start_time:.2f}s: {result}')
+
+        if not self.is_running:
+            return
+
+        self.statusSignal.emit('idle')
+        self.resultSignal.emit(result)
+
+    def _streaming_worker(self, interval):
+        """Worker thread that periodically transcribes accumulated audio."""
+        # Wait for speech to be detected before starting transcription
+        while not self._streaming_done.is_set():
+            if self._speech_detected_event.wait(timeout=0.5):
+                break
+
+        if self._streaming_done.is_set():
+            return
+
+        while not self._streaming_done.wait(timeout=interval):
+            # Get snapshot of current audio
+            with self._recording_lock:
+                if not self._recording_data:
+                    continue
+                snapshot = np.array(self._recording_data, dtype=np.int16)
+
+            duration = len(snapshot) / (self.sample_rate or 16000)
+            if duration < 0.5:
+                continue
+
+            try:
+                result = transcribe(snapshot, self.local_model, final=False)
+                if result:
+                    ConfigManager.console_print(f'Streaming transcription: {result}')
+                    self.intermediateSignal.emit(result)
+            except Exception as e:
+                ConfigManager.console_print(f'Streaming transcription error: {e}')
+
+    def _record_audio(self, streaming=False):
         """
         Record audio from the microphone and save it to a temporary file.
 
+        :param streaming: If True, store audio in thread-safe self._recording_data
         :return: numpy array of audio data, or None if the recording is too short
         """
         recording_options = ConfigManager.get_config_section('recording_options')
@@ -152,7 +245,12 @@ class ResultThread(QThread):
                 # Save frame
                 frame = np.array(list(audio_buffer), dtype=np.int16)
                 audio_buffer.clear()
-                recording.extend(frame)
+
+                if streaming:
+                    with self._recording_lock:
+                        self._recording_data.extend(frame)
+                else:
+                    recording.extend(frame)
 
                 # Avoid trying to detect voice in initial frames
                 if initial_frames_to_skip > 0:
@@ -165,13 +263,24 @@ class ResultThread(QThread):
                         if not speech_detected:
                             ConfigManager.console_print("Speech detected.")
                             speech_detected = True
+                            if streaming:
+                                self._speech_detected_event.set()
                     else:
                         silent_frame_count += 1
 
                     if speech_detected and silent_frame_count > silence_frames:
                         break
+                elif streaming and not self._speech_detected_event.is_set():
+                    # No VAD in this recording mode (press_to_toggle/hold_to_record)
+                    # Start streaming transcription after initial frames
+                    self._speech_detected_event.set()
 
-        audio_data = np.array(recording, dtype=np.int16)
+        if streaming:
+            with self._recording_lock:
+                audio_data = np.array(self._recording_data, dtype=np.int16)
+        else:
+            audio_data = np.array(recording, dtype=np.int16)
+
         duration = len(audio_data) / self.sample_rate
 
         ConfigManager.console_print(f'Recording finished. Size: {audio_data.size} samples, Duration: {duration:.2f} seconds')
